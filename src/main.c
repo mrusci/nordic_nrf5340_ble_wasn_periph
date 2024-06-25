@@ -61,6 +61,7 @@ LOG_MODULE_REGISTER(LOG_MODULE_NAME);
 #define UART_WAIT_FOR_RX CONFIG_BT_NUS_UART_RX_WAIT_TIME
 
 static K_SEM_DEFINE(ble_init_ok, 0, 1);
+static K_SEM_DEFINE(ble_send_loop, 0, 1);
 
 static struct bt_conn *current_conn;
 static struct bt_conn *auth_conn;
@@ -107,8 +108,10 @@ static const struct device * spi_hci_dev;
  * the SPI-based BT controller.
  */
 /* Needs to be aligned with the SPI master buffer size */
-#define SPI_MAX_MSG_LEN        256
+#define SPI_MAX_MSG_LEN        64100
 #define SPI_DATA_TO_GET			22
+#define SPI_WAV_DATA        	200
+
 volatile static uint8_t rxmsg[SPI_MAX_MSG_LEN];
 static struct spi_buf rx;
 const static struct spi_buf_set rx_bufs = {
@@ -388,6 +391,112 @@ static int uart_init(void)
 }
 */
 
+
+
+static K_SEM_DEFINE(througput_test_ready, 0, 3);
+static uint8_t payload_length=24;
+#define INTERVAL_MIN   15     
+#define INTERVAL_MAX  15   
+#define TOTAL_PACKETS 300
+
+static const char *phy2str(uint8_t phy)
+{
+	switch (phy) {
+	case 0: return "No packets";
+	case BT_GAP_LE_PHY_1M: return "LE 1M";
+	case BT_GAP_LE_PHY_2M: return "LE 2M";
+	case BT_GAP_LE_PHY_CODED: return "LE Coded";
+	default: return "Unknown";
+	}
+}
+
+
+static struct bt_le_conn_param *conn_param = BT_LE_CONN_PARAM(INTERVAL_MIN, INTERVAL_MAX, 0, 400);
+static int update_connection_parameters(void)
+{	
+	int err;
+	err = bt_conn_le_param_update(current_conn, conn_param);
+		if (err) {
+			LOG_ERR("Cannot update conneciton parameter (err: %d)", err);
+			return err;
+		}
+	LOG_INF("Connection parameters update requested");
+	return 0;
+}
+static void conn_params_updated(struct bt_conn *conn, uint16_t interval, uint16_t latency, uint16_t timeout)
+{
+	uint32_t interval_int= interval*1.25;
+	LOG_INF("Conn params updated: interval %d ms, latency %d, timeout: %d0 ms",interval_int, latency, timeout);
+
+	if (interval== INTERVAL_MIN) 
+	{
+		k_sem_give(&througput_test_ready);
+	}
+}
+
+static void le_data_length_updated(struct bt_conn *conn,
+				   struct bt_conn_le_data_len_info *info)
+{
+	LOG_INF("LE data len updated: TX (len: %d time: %d)"
+	       " RX (len: %d time: %d)\n", info->tx_max_len,
+	       info->tx_max_time, info->rx_max_len, info->rx_max_time);
+	
+
+}
+
+
+static void MTU_exchange_cb(struct bt_conn *conn, uint8_t err, struct bt_gatt_exchange_params *params)
+{
+	if (!err) {
+		LOG_INF("MTU exchange done. "); 
+		payload_length=bt_gatt_get_mtu(current_conn)-3; //3 bytes ATT header
+		LOG_INF("payload_length = %d ", payload_length); 
+
+	} else {
+		LOG_WRN("MTU exchange failed (err %" PRIu8 ")", err);
+	}
+}
+static void request_mtu_exchange(void)
+{	int err;
+	static struct bt_gatt_exchange_params exchange_params;
+	exchange_params.func = MTU_exchange_cb;
+
+	err = bt_gatt_exchange_mtu(current_conn, &exchange_params);
+	if (err) {
+		LOG_WRN("MTU exchange failed (err %d)", err);
+	} else {
+		LOG_INF("MTU exchange pending");
+	}
+	
+
+}
+
+
+static void request_data_len_update(void)
+{
+	int err;
+	err = bt_conn_le_data_len_update(current_conn, BT_LE_DATA_LEN_PARAM_MAX);
+		if (err) {
+			LOG_ERR("LE data length update request failed: %d",  err);
+		}
+}
+static void request_phy_update(void)
+{
+	int err;
+
+	err = bt_conn_le_phy_update(current_conn, BT_CONN_LE_PHY_PARAM_2M);
+		if (err) {
+			LOG_ERR("Phy update request failed: %d",  err);
+		}
+}
+static void le_phy_updated(struct bt_conn *conn,
+			   struct bt_conn_le_phy_info *param)
+{
+	LOG_INF("LE PHY updated: TX PHY %s, RX PHY %s\n",
+	       phy2str(param->tx_phy), phy2str(param->rx_phy));
+}
+
+
 static void connected(struct bt_conn *conn, uint8_t err)
 {
 	char addr[BT_ADDR_LE_STR_LEN];
@@ -403,6 +512,15 @@ static void connected(struct bt_conn *conn, uint8_t err)
 	current_conn = bt_conn_ref(conn);
 
 	dk_set_led_on(CON_STATUS_LED);
+
+	//Delays added to avoid collision (in case the central also send request), should be better with a state machine. 
+	update_connection_parameters();
+	k_sleep(K_MSEC(500));
+	request_mtu_exchange();
+	k_sleep(K_MSEC(500));
+	request_data_len_update();
+	k_sleep(K_MSEC(500));
+	request_phy_update();
 }
 
 static void disconnected(struct bt_conn *conn, uint8_t reason)
@@ -445,6 +563,9 @@ static void security_changed(struct bt_conn *conn, bt_security_t level,
 BT_CONN_CB_DEFINE(conn_callbacks) = {
 	.connected    = connected,
 	.disconnected = disconnected,
+	.le_param_updated= conn_params_updated,
+	.le_phy_updated = le_phy_updated,
+	.le_data_len_updated = le_data_length_updated,
 #ifdef CONFIG_BT_NUS_SECURITY_ENABLED
 	.security_changed = security_changed,
 #endif
@@ -564,8 +685,20 @@ static void bt_receive_cb(struct bt_conn *conn, const uint8_t *const data,
 	}
 }
 
+volatile int cnt_sent = 0;
+static void bt_sent_cb(struct bt_conn *conn)
+{	
+	LOG_INF("Sent Data: %d", cnt_sent);
+	if (cnt_sent>0){
+		cnt_sent--;
+		k_sem_give(&ble_send_loop);
+	}
+}
+
+
 static struct bt_nus_cb nus_cb = {
 	.received = bt_receive_cb,
+	.sent = bt_sent_cb,
 };
 
 void error(void)
@@ -616,7 +749,8 @@ void button_changed(uint32_t button_state, uint32_t has_changed)
 			send_data_to_central();
 	}
 	if(buttons & IRQ_LINE_REQ){
-			send_data_to_central();
+		LOG_INF("Get WAV and send via BLE!");
+		stop_command_wav();
 	}
 	LOG_INF("button: %d", buttons);
 
@@ -626,7 +760,7 @@ void BUTTON_PinInHandler(const struct device *gpiodev, struct gpio_callback *cb,
 	       uint32_t pin){
 	LOG_INF("IRQ Received");
 //	send_data_to_central();
-	for (int i =0; i<SPI_MAX_MSG_LEN;i++){
+	for (int i =0; i<SPI_DATA_TO_GET;i++){
 			txmsg[i] = (unsigned char) i;
 		}
 		tx.buf = txmsg;
@@ -648,7 +782,7 @@ void BUTTON_PinInHandler(const struct device *gpiodev, struct gpio_callback *cb,
 }
 void send_data_to_central(){
 
-	for (int i =0; i<SPI_MAX_MSG_LEN;i++){
+	for (int i =0; i<SPI_DATA_TO_GET;i++){
 			txmsg[i] = (unsigned char) i;
 		}
 		tx.buf = txmsg;
@@ -663,6 +797,44 @@ void send_data_to_central(){
 }
 
 
+
+
+void wav_write_thread(void)
+{
+	while(1){
+		/* Don't go any further until BLE is initialized */
+		k_sem_take(&ble_send_loop, K_FOREVER);
+		LOG_INF("Sent package: %d", cnt_sent);
+
+		for (int i =0; i<SPI_WAV_DATA;i++){
+				txmsg[i] = (unsigned char) i;
+		}
+		tx.buf = txmsg;
+		tx.len = SPI_WAV_DATA;
+		rx.buf = rxmsg;
+		rx.len = SPI_WAV_DATA;
+		int ret = spi_transceive(spi_hci_dev, &spi_cfg, &tx_bufs, &rx_bufs);
+		LOG_INF("Going to send via BLE: %d", rx.len);
+		if (ret < 0) {
+			LOG_ERR("SPI transceive error: %d", ret );
+		} else{
+			ret = bt_nus_send(NULL, rx.buf, rx.len);
+			if (ret) 
+				LOG_WRN("Failed to send data over BLE connection: %d", ret);
+		} 
+
+	}
+
+}
+
+K_THREAD_DEFINE(ble_write_thread_id, STACKSIZE, wav_write_thread, NULL, NULL,
+		NULL, PRIORITY, 0, 0);
+
+
+void stop_command_wav(){
+	cnt_sent = 100;
+	k_sem_give(&ble_send_loop);
+}
 
 void main(void)
 {
@@ -768,6 +940,9 @@ void main(void)
 
 
 }
+
+
+
 
 void ble_write_thread(void)
 {
