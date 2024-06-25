@@ -55,13 +55,18 @@ LOG_MODULE_REGISTER(LOG_MODULE_NAME);
 #define KEY_PASSKEY_REJECT DK_BTN2_MSK
 #define SPI_READ_REQ DK_BTN3_MSK
 #define IRQ_LINE_REQ DK_BTN4_MSK
+#define DBG_REQ DK_BTN2_MSK
+#define CENT_REQ DK_BTN1_MSK
+
 
 #define UART_BUF_SIZE CONFIG_BT_NUS_UART_BUFFER_SIZE
 #define UART_WAIT_FOR_BUF_DELAY K_MSEC(50)
 #define UART_WAIT_FOR_RX CONFIG_BT_NUS_UART_RX_WAIT_TIME
 
 static K_SEM_DEFINE(ble_init_ok, 0, 1);
-static K_SEM_DEFINE(ble_send_loop, 0, 1);
+
+#define N_READ_TASK 21
+static K_SEM_DEFINE(ble_send_loop, 0, N_READ_TASK);
 
 static struct bt_conn *current_conn;
 static struct bt_conn *auth_conn;
@@ -108,8 +113,8 @@ static const struct device * spi_hci_dev;
  * the SPI-based BT controller.
  */
 /* Needs to be aligned with the SPI master buffer size */
-#define SPI_MAX_MSG_LEN        64100
-#define SPI_DATA_TO_GET			22
+#define SPI_MAX_MSG_LEN        256
+#define SPI_DATA_TO_GET			21
 #define SPI_WAV_DATA        	200
 
 volatile static uint8_t rxmsg[SPI_MAX_MSG_LEN];
@@ -395,8 +400,8 @@ static int uart_init(void)
 
 static K_SEM_DEFINE(througput_test_ready, 0, 3);
 static uint8_t payload_length=24;
-#define INTERVAL_MIN   15     
-#define INTERVAL_MAX  15   
+#define INTERVAL_MIN   10     
+#define INTERVAL_MAX  10   
 #define TOTAL_PACKETS 300
 
 static const char *phy2str(uint8_t phy)
@@ -728,6 +733,8 @@ static void num_comp_reply(bool accept)
 
 #endif /* CONFIG_BT_NUS_SECURITY_ENABLED */
 
+int stop_command_from_central = 0;
+int get_command_from_central = 0;
 
 void button_changed(uint32_t button_state, uint32_t has_changed)
 {
@@ -745,41 +752,69 @@ void button_changed(uint32_t button_state, uint32_t has_changed)
 	}
 #endif /* CONFIG_BT_NUS_SECURITY_ENABLED */
 	if(buttons & SPI_READ_REQ){
-			LOG_INF("Button pressed: %d", buttons);
-			send_data_to_central();
+		LOG_INF("Button pressed: %d", buttons);
+		send_data_to_central();
 	}
 	if(buttons & IRQ_LINE_REQ){
-		LOG_INF("Get WAV and send via BLE!");
-		stop_command_wav();
+		LOG_INF("IRQ line from GAP!");
+		get_data_gap();
 	}
+	if(buttons & DBG_REQ){
+		LOG_INF("Get WAV and send via BLE!");
+		send_wav();
+	}
+	if(buttons & CENT_REQ){
+		LOG_INF("Central ask data!");
+		get_command_from_central = 1;
+	}
+	
 	LOG_INF("button: %d", buttons);
 
 }
 
-void BUTTON_PinInHandler(const struct device *gpiodev, struct gpio_callback *cb,
-	       uint32_t pin){
-	LOG_INF("IRQ Received");
-//	send_data_to_central();
-	for (int i =0; i<SPI_DATA_TO_GET;i++){
-			txmsg[i] = (unsigned char) i;
-		}
-		tx.buf = txmsg;
-		tx.len = SPI_DATA_TO_GET;
-		rx.buf = rxmsg;
-		rx.len = SPI_DATA_TO_GET;
-	LOG_INF("IRQ Receive 111");
 
-		int ret = spi_transceive(spi_hci_dev, &spi_cfg, &tx_bufs, &rx_bufs);
-	LOG_INF("SPI Done Received");
 
-		if (ret < 0) {
-			LOG_ERR("SPI transceive error: %d", ret);
-		} 
-		LOG_INF("SPI sent");
-
-		if (bt_nus_send(NULL, rx.buf, rx.len)) 
-			LOG_WRN("Failed to send data over BLE connection");
+void send_wav(){
+	cnt_sent = 2*(4*16000)/200;  // 100;
+	for(int j=0;j<N_READ_TASK;j++)
+		k_sem_give(&ble_send_loop);
 }
+
+void get_data_gap(){
+
+	for (int i =0; i<SPI_DATA_TO_GET;i++){
+		txmsg[i] = (unsigned char) i;
+	}
+
+	if (stop_command_from_central){
+		txmsg[1] = 0x6;
+		txmsg[2] = 0x6;
+		txmsg[3] = 0x6;
+	} else if (get_command_from_central){
+		txmsg[1] = 0x3;
+		txmsg[2] = 0x3;
+		txmsg[3] = 0x3;
+	}
+
+
+	tx.buf = txmsg;
+	tx.len = SPI_DATA_TO_GET;
+	rx.buf = rxmsg;
+	rx.len = SPI_DATA_TO_GET;
+	int ret = spi_transceive(spi_hci_dev, &spi_cfg, &tx_bufs, &rx_bufs);
+	if (ret < 0) {
+		LOG_ERR("SPI transceive error: %d", ret);
+	} 
+
+	if (stop_command_from_central){
+		stop_command_from_central = 0;
+	} else if (get_command_from_central){
+		send_wav();
+		get_command_from_central = 0;
+	}
+
+}
+
 void send_data_to_central(){
 
 	for (int i =0; i<SPI_DATA_TO_GET;i++){
@@ -810,11 +845,12 @@ void wav_write_thread(void)
 				txmsg[i] = (unsigned char) i;
 		}
 		tx.buf = txmsg;
-		tx.len = SPI_WAV_DATA;
+		tx.len = SPI_WAV_DATA + 1;
 		rx.buf = rxmsg;
-		rx.len = SPI_WAV_DATA;
+		rx.len = SPI_WAV_DATA + 1 ;
 		int ret = spi_transceive(spi_hci_dev, &spi_cfg, &tx_bufs, &rx_bufs);
-		LOG_INF("Going to send via BLE: %d", rx.len);
+		//LOG_INF("First four bytes %d %d %d %d", rxmsg[0], rxmsg[1],rxmsg[2],rxmsg[3]);
+		//LOG_INF("Going to send via BLE: %d", rx.len);
 		if (ret < 0) {
 			LOG_ERR("SPI transceive error: %d", ret );
 		} else{
@@ -831,10 +867,7 @@ K_THREAD_DEFINE(ble_write_thread_id, STACKSIZE, wav_write_thread, NULL, NULL,
 		NULL, PRIORITY, 0, 0);
 
 
-void stop_command_wav(){
-	cnt_sent = 100;
-	k_sem_give(&ble_send_loop);
-}
+
 
 void main(void)
 {
