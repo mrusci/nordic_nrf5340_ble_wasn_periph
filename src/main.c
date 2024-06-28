@@ -117,6 +117,9 @@ int get_command_from_central = 0;
 #define SPI_DATA_TO_GET			21
 #define SPI_WAV_DATA        	200
 
+#define DEVICE_ID (0x00)
+char gap_device_id = 99;
+
 volatile static uint8_t rxmsg[SPI_MAX_MSG_LEN];
 static struct spi_buf rx;
 const static struct spi_buf_set rx_bufs = {
@@ -492,8 +495,8 @@ static void bt_receive_cb(struct bt_conn *conn, const uint8_t *const data,
 				LOG_INF("05 Malloc uart_data_t");
 
 				buf->len = 4;
-				buf->data[0] = 5;
-				buf->data[1] = 2;
+				buf->data[0] = DEVICE_ID;
+				buf->data[1] = gap_device_id;
 				buf->data[2] = 3;
 				buf->data[3] = 4;
 
@@ -624,8 +627,11 @@ void get_data_gap(){
 			rxmsg[15], rxmsg[16], rxmsg[17], rxmsg[18], rxmsg[19], rxmsg[20]);
 
 	if ((rxmsg[1] == 0x05) && (rxmsg[2] == 0x06) && (rxmsg[3] == 0x07) && (rxmsg[4] == 0x08) && 
-		(rxmsg[5] == 0x05) && (rxmsg[6] == 0x06) && (rxmsg[7] == 0x07) && (rxmsg[8] == 0x08) )
+		(rxmsg[5] == 0x05) && (rxmsg[6] == 0x06) && (rxmsg[7] == 0x07)){
+			gap_device_id = rxmsg[8];
 			ack_from_gap = 1;
+	}
+
 
 	if (ack_from_gap == 0){
 		// clear only if not an ack exchange
