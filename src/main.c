@@ -65,8 +65,6 @@ LOG_MODULE_REGISTER(LOG_MODULE_NAME);
 
 static K_SEM_DEFINE(ble_init_ok, 0, 1);
 
-#define N_READ_TASK 21
-static K_SEM_DEFINE(ble_send_loop, 0, N_READ_TASK);
 
 static struct bt_conn *current_conn;
 static struct bt_conn *auth_conn;
@@ -107,6 +105,8 @@ struct spi_cs_control spim_cs = {
 
 static const struct device * spi_hci_dev; 
 
+int stop_command_from_central = 0;
+int get_command_from_central = 0;
 
 /*
  * This is the SPI bus controller device used to exchange data with
@@ -176,6 +176,7 @@ static void uart_cb(const struct device *dev, struct uart_event *evt, void *user
 		}
 
 		k_free(buf);
+		LOG_INF("00 k_free uart_data_t");
 
 		buf = k_fifo_get(&fifo_uart_tx_data, K_NO_WAIT);
 		if (!buf) {
@@ -210,6 +211,8 @@ static void uart_cb(const struct device *dev, struct uart_event *evt, void *user
 		disable_req = false;
 
 		buf = k_malloc(sizeof(*buf));
+		LOG_INF("00 Malloc uart_data_t");
+
 		if (buf) {
 			buf->len = 0;
 		} else {
@@ -226,6 +229,8 @@ static void uart_cb(const struct device *dev, struct uart_event *evt, void *user
 	case UART_RX_BUF_REQUEST:
 		LOG_DBG("UART_RX_BUF_REQUEST");
 		buf = k_malloc(sizeof(*buf));
+		LOG_INF("01 Malloc uart_data_t");
+
 		if (buf) {
 			buf->len = 0;
 //			uart_rx_buf_rsp(uart, buf->data, sizeof(buf->data));
@@ -244,6 +249,8 @@ static void uart_cb(const struct device *dev, struct uart_event *evt, void *user
 			k_fifo_put(&fifo_uart_rx_data, buf);
 		} else {
 			k_free(buf);
+			LOG_INF("01 k_free uart_data_t");
+
 		}
 
 		break;
@@ -273,6 +280,8 @@ static void uart_work_handler(struct k_work *item)
 	struct uart_data_t *buf;
 
 	buf = k_malloc(sizeof(*buf));
+	LOG_INF("03 Malloc uart_data_t");
+
 	if (buf) {
 		buf->len = 0;
 	} else {
@@ -284,222 +293,7 @@ static void uart_work_handler(struct k_work *item)
 //	uart_rx_enable(uart, buf->data, sizeof(buf->data), UART_WAIT_FOR_RX);
 }
 
-/*
-static bool uart_test_async_api(const struct device *dev)
-{
-	const struct uart_driver_api *api =
-			(const struct uart_driver_api *)dev->api;
 
-	return (api->callback_set != NULL);
-}
-
-static int uart_init(void)
-{
-	int err;
-	int pos;
-	struct uart_data_t *rx;
-	struct uart_data_t *tx;
-
-	if (!device_is_ready(uart)) {
-		return -ENODEV;
-	}
-
-	if (IS_ENABLED(CONFIG_USB_DEVICE_STACK)) {
-		err = usb_enable(NULL);
-		if (err && (err != -EALREADY)) {
-			LOG_ERR("Failed to enable USB");
-			return err;
-		}
-	}
-
-	rx = k_malloc(sizeof(*rx));
-	if (rx) {
-		rx->len = 0;
-	} else {
-		return -ENOMEM;
-	}
-
-	k_work_init_delayable(&uart_work, uart_work_handler);
-
-
-	if (IS_ENABLED(CONFIG_BT_NUS_UART_ASYNC_ADAPTER) && !uart_test_async_api(uart)) {
-		// Implement API adapter 
-		uart_async_adapter_init(async_adapter, uart);
-		uart = async_adapter;
-	}
-
-	err = uart_callback_set(uart, uart_cb, NULL);
-	if (err) {
-		k_free(rx);
-		LOG_ERR("Cannot initialize UART callback");
-		return err;
-	}
-
-	if (IS_ENABLED(CONFIG_UART_LINE_CTRL)) {
-		LOG_INF("Wait for DTR");
-		while (true) {
-			uint32_t dtr = 0;
-
-			uart_line_ctrl_get(uart, UART_LINE_CTRL_DTR, &dtr);
-			if (dtr) {
-				break;
-			}
-			// Give CPU resources to low priority threads.
-			k_sleep(K_MSEC(100));
-		}
-		LOG_INF("DTR set");
-		err = uart_line_ctrl_set(uart, UART_LINE_CTRL_DCD, 1);
-		if (err) {
-			LOG_WRN("Failed to set DCD, ret code %d", err);
-		}
-		err = uart_line_ctrl_set(uart, UART_LINE_CTRL_DSR, 1);
-		if (err) {
-			LOG_WRN("Failed to set DSR, ret code %d", err);
-		}
-	}
-
-	tx = k_malloc(sizeof(*tx));
-
-	if (tx) {
-		pos = snprintf(tx->data, sizeof(tx->data),
-			       "Starting Nordic UART service example\r\n");
-
-		if ((pos < 0) || (pos >= sizeof(tx->data))) {
-			k_free(rx);
-			k_free(tx);
-			LOG_ERR("snprintf returned %d", pos);
-			return -ENOMEM;
-		}
-
-		tx->len = pos;
-	} else {
-		k_free(rx);
-		return -ENOMEM;
-	}
-
-	err = uart_tx(uart, tx->data, tx->len, SYS_FOREVER_MS);
-	if (err) {
-		k_free(rx);
-		k_free(tx);
-		LOG_ERR("Cannot display welcome message (err: %d)", err);
-		return err;
-	}
-
-	err = uart_rx_enable(uart, rx->data, sizeof(rx->data), 50);
-	if (err) {
-		LOG_ERR("Cannot enable uart reception (err: %d)", err);
-		// Free the rx buffer only because the tx buffer will be handled in the callback
-		k_free(rx);
-	}
-
-	return err;
-}
-*/
-
-
-
-static K_SEM_DEFINE(througput_test_ready, 0, 3);
-static uint8_t payload_length=24;
-#define INTERVAL_MIN   10     
-#define INTERVAL_MAX  10   
-#define TOTAL_PACKETS 300
-
-static const char *phy2str(uint8_t phy)
-{
-	switch (phy) {
-	case 0: return "No packets";
-	case BT_GAP_LE_PHY_1M: return "LE 1M";
-	case BT_GAP_LE_PHY_2M: return "LE 2M";
-	case BT_GAP_LE_PHY_CODED: return "LE Coded";
-	default: return "Unknown";
-	}
-}
-
-
-static struct bt_le_conn_param *conn_param = BT_LE_CONN_PARAM(INTERVAL_MIN, INTERVAL_MAX, 0, 400);
-static int update_connection_parameters(void)
-{	
-	int err;
-	err = bt_conn_le_param_update(current_conn, conn_param);
-		if (err) {
-			LOG_ERR("Cannot update conneciton parameter (err: %d)", err);
-			return err;
-		}
-	LOG_INF("Connection parameters update requested");
-	return 0;
-}
-static void conn_params_updated(struct bt_conn *conn, uint16_t interval, uint16_t latency, uint16_t timeout)
-{
-	uint32_t interval_int= interval*1.25;
-	LOG_INF("Conn params updated: interval %d ms, latency %d, timeout: %d0 ms",interval_int, latency, timeout);
-
-	if (interval== INTERVAL_MIN) 
-	{
-		k_sem_give(&througput_test_ready);
-	}
-}
-
-static void le_data_length_updated(struct bt_conn *conn,
-				   struct bt_conn_le_data_len_info *info)
-{
-	LOG_INF("LE data len updated: TX (len: %d time: %d)"
-	       " RX (len: %d time: %d)\n", info->tx_max_len,
-	       info->tx_max_time, info->rx_max_len, info->rx_max_time);
-	
-
-}
-
-
-static void MTU_exchange_cb(struct bt_conn *conn, uint8_t err, struct bt_gatt_exchange_params *params)
-{
-	if (!err) {
-		LOG_INF("MTU exchange done. "); 
-		payload_length=bt_gatt_get_mtu(current_conn)-3; //3 bytes ATT header
-		LOG_INF("payload_length = %d ", payload_length); 
-
-	} else {
-		LOG_WRN("MTU exchange failed (err %" PRIu8 ")", err);
-	}
-}
-static void request_mtu_exchange(void)
-{	int err;
-	static struct bt_gatt_exchange_params exchange_params;
-	exchange_params.func = MTU_exchange_cb;
-
-	err = bt_gatt_exchange_mtu(current_conn, &exchange_params);
-	if (err) {
-		LOG_WRN("MTU exchange failed (err %d)", err);
-	} else {
-		LOG_INF("MTU exchange pending");
-	}
-	
-
-}
-
-
-static void request_data_len_update(void)
-{
-	int err;
-	err = bt_conn_le_data_len_update(current_conn, BT_LE_DATA_LEN_PARAM_MAX);
-		if (err) {
-			LOG_ERR("LE data length update request failed: %d",  err);
-		}
-}
-static void request_phy_update(void)
-{
-	int err;
-
-	err = bt_conn_le_phy_update(current_conn, BT_CONN_LE_PHY_PARAM_2M);
-		if (err) {
-			LOG_ERR("Phy update request failed: %d",  err);
-		}
-}
-static void le_phy_updated(struct bt_conn *conn,
-			   struct bt_conn_le_phy_info *param)
-{
-	LOG_INF("LE PHY updated: TX PHY %s, RX PHY %s\n",
-	       phy2str(param->tx_phy), phy2str(param->rx_phy));
-}
 
 
 static void connected(struct bt_conn *conn, uint8_t err)
@@ -518,14 +312,7 @@ static void connected(struct bt_conn *conn, uint8_t err)
 
 	dk_set_led_on(CON_STATUS_LED);
 
-	//Delays added to avoid collision (in case the central also send request), should be better with a state machine. 
-	update_connection_parameters();
-	k_sleep(K_MSEC(500));
-	request_mtu_exchange();
-	k_sleep(K_MSEC(500));
-	request_data_len_update();
-	k_sleep(K_MSEC(500));
-	request_phy_update();
+
 }
 
 static void disconnected(struct bt_conn *conn, uint8_t reason)
@@ -568,9 +355,6 @@ static void security_changed(struct bt_conn *conn, bt_security_t level,
 BT_CONN_CB_DEFINE(conn_callbacks) = {
 	.connected    = connected,
 	.disconnected = disconnected,
-	.le_param_updated= conn_params_updated,
-	.le_phy_updated = le_phy_updated,
-	.le_data_len_updated = le_data_length_updated,
 #ifdef CONFIG_BT_NUS_SECURITY_ENABLED
 	.security_changed = security_changed,
 #endif
@@ -647,15 +431,18 @@ static struct bt_conn_auth_info_cb conn_auth_info_callbacks;
 static void bt_receive_cb(struct bt_conn *conn, const uint8_t *const data,
 			  uint16_t len)
 {
-	int err;
+	int err = 0;
 	char addr[BT_ADDR_LE_STR_LEN] = {0};
+	struct uart_data_t *buf;
 
 	bt_addr_le_to_str(bt_conn_get_dst(conn), addr, ARRAY_SIZE(addr));
 
-	LOG_INF("Received data from: %s", addr);
+	LOG_INF("Received data from: %s, len: %d", addr, len);
+	for (int i =0;i<len;i++) LOG_INF("%d, ", data[i]);
 
 	for (uint16_t pos = 0; pos != len;) {
 		struct uart_data_t *tx = k_malloc(sizeof(*tx));
+		LOG_INF("04 Malloc uart_data_t");
 
 		if (!tx) {
 			LOG_WRN("Not able to allocate UART send data buffer");
@@ -678,32 +465,57 @@ static void bt_receive_cb(struct bt_conn *conn, const uint8_t *const data,
 		/* Append the LF character when the CR character triggered
 		 * transmission from the peer.
 		 */
-		if ((pos == len) && (data[len - 1] == '\r')) {
-			tx->data[tx->len] = '\n';
-			tx->len++;
-		}
+//		if ((pos == len) && (data[len - 1] == '\r')) {
+//			tx->data[tx->len] = '\n';
+//			tx->len++;
+//		}
 
+// do not send anything!!!! uart not here
 //		err = uart_tx(uart, tx->data, tx->len, SYS_FOREVER_MS);
-		if (err) {
-			k_fifo_put(&fifo_uart_tx_data, tx);
-		}
-	}
-}
+//		if (err) {
+//			k_fifo_put(&fifo_uart_tx_data, tx);
+//		}
 
-volatile int cnt_sent = 0;
-static void bt_sent_cb(struct bt_conn *conn)
-{	
-	LOG_INF("Sent Data: %d", cnt_sent);
-	if (cnt_sent>0){
-		cnt_sent--;
-		k_sem_give(&ble_send_loop);
+		// check the command
+		if (tx->len == 4){
+			if((tx->data[0] == 51) && (tx->data[1] == 51) && (tx->data[2] == 51)){
+				LOG_INF("Get data");	// command 333
+				get_command_from_central = 1;
+			} else
+			if((tx->data[0] == 54) && (tx->data[1] == 54) && (tx->data[2] == 54)){
+				LOG_INF("Stop command");
+				stop_command_from_central = 1;
+			} else
+			if((tx->data[0] == 57) && (tx->data[1] == 57) && (tx->data[2] == 57)){
+				LOG_INF("ID COMMAND");	// command 999
+				buf = k_malloc(sizeof(*buf));
+				LOG_INF("05 Malloc uart_data_t");
+
+				buf->len = 4;
+				buf->data[0] = 5;
+				buf->data[1] = 2;
+				buf->data[2] = 3;
+				buf->data[3] = 4;
+
+				k_fifo_put(&fifo_uart_rx_data, buf);
+
+			} else { 
+				// do something 
+			}
+		}
+
+//		// send back the command
+//		if (bt_nus_send(NULL, tx->data, tx->len)) {
+//			LOG_WRN("Failed to send data over BLE connection");
+//		}
+
+		k_free(tx);
 	}
 }
 
 
 static struct bt_nus_cb nus_cb = {
 	.received = bt_receive_cb,
-	.sent = bt_sent_cb,
 };
 
 void error(void)
@@ -733,8 +545,7 @@ static void num_comp_reply(bool accept)
 
 #endif /* CONFIG_BT_NUS_SECURITY_ENABLED */
 
-int stop_command_from_central = 0;
-int get_command_from_central = 0;
+
 
 void button_changed(uint32_t button_state, uint32_t has_changed)
 {
@@ -760,11 +571,12 @@ void button_changed(uint32_t button_state, uint32_t has_changed)
 		get_data_gap();
 	}
 	if(buttons & DBG_REQ){
-		LOG_INF("Get WAV and send via BLE!");
-		send_wav();
+		LOG_INF("Stop Command!");
+		stop_command_from_central = 1;
+
 	}
 	if(buttons & CENT_REQ){
-		LOG_INF("Central ask data!");
+		LOG_INF("Request Data!");
 		get_command_from_central = 1;
 	}
 	
@@ -774,16 +586,14 @@ void button_changed(uint32_t button_state, uint32_t has_changed)
 
 
 
-void send_wav(){
-	cnt_sent = 2*(4*16000)/200;  // 100;
-	for(int j=0;j<N_READ_TASK;j++)
-		k_sem_give(&ble_send_loop);
-}
 
 void get_data_gap(){
 
+	int ack_from_gap = 0;
+	
 	for (int i =0; i<SPI_DATA_TO_GET;i++){
 		txmsg[i] = (unsigned char) i;
+		rxmsg[i] = 0;
 	}
 
 	if (stop_command_from_central){
@@ -804,14 +614,28 @@ void get_data_gap(){
 	int ret = spi_transceive(spi_hci_dev, &spi_cfg, &tx_bufs, &rx_bufs);
 	if (ret < 0) {
 		LOG_ERR("SPI transceive error: %d", ret);
-	} 
-
-	if (stop_command_from_central){
-		stop_command_from_central = 0;
-	} else if (get_command_from_central){
-		send_wav();
-		get_command_from_central = 0;
 	}
+
+
+	LOG_INF("Received data: %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d", 
+			rxmsg[0], rxmsg[1], rxmsg[2], rxmsg[3], rxmsg[4], 
+			rxmsg[5], rxmsg[6], rxmsg[7], rxmsg[8], rxmsg[9], 
+			rxmsg[10], rxmsg[11], rxmsg[12], rxmsg[13], rxmsg[14], 
+			rxmsg[15], rxmsg[16], rxmsg[17], rxmsg[18], rxmsg[19], rxmsg[20]);
+
+	if ((rxmsg[1] == 0x05) && (rxmsg[2] == 0x06) && (rxmsg[3] == 0x07) && (rxmsg[4] == 0x08) && 
+		(rxmsg[5] == 0x05) && (rxmsg[6] == 0x06) && (rxmsg[7] == 0x07) && (rxmsg[8] == 0x08) )
+			ack_from_gap = 1;
+
+	if (ack_from_gap == 0){
+		// clear only if not an ack exchange
+		if (stop_command_from_central){
+			stop_command_from_central = 0;
+		} else if (get_command_from_central){
+			get_command_from_central = 0;
+		}
+	}
+
 
 }
 
@@ -833,38 +657,6 @@ void send_data_to_central(){
 
 
 
-
-void wav_write_thread(void)
-{
-	while(1){
-		/* Don't go any further until BLE is initialized */
-		k_sem_take(&ble_send_loop, K_FOREVER);
-		LOG_INF("Sent package: %d", cnt_sent);
-
-		for (int i =0; i<SPI_WAV_DATA;i++){
-				txmsg[i] = (unsigned char) i;
-		}
-		tx.buf = txmsg;
-		tx.len = SPI_WAV_DATA + 1;
-		rx.buf = rxmsg;
-		rx.len = SPI_WAV_DATA + 1 ;
-		int ret = spi_transceive(spi_hci_dev, &spi_cfg, &tx_bufs, &rx_bufs);
-		//LOG_INF("First four bytes %d %d %d %d", rxmsg[0], rxmsg[1],rxmsg[2],rxmsg[3]);
-		//LOG_INF("Going to send via BLE: %d", rx.len);
-		if (ret < 0) {
-			LOG_ERR("SPI transceive error: %d", ret );
-		} else{
-			ret = bt_nus_send(NULL, rx.buf, rx.len);
-			if (ret) 
-				LOG_WRN("Failed to send data over BLE connection: %d", ret);
-		} 
-
-	}
-
-}
-
-K_THREAD_DEFINE(ble_write_thread_id, STACKSIZE, wav_write_thread, NULL, NULL,
-		NULL, PRIORITY, 0, 0);
 
 
 
@@ -936,7 +728,7 @@ void main(void)
 
 	LOG_INF("Bluetooth initialized");
 
-//	k_sem_give(&ble_init_ok);
+	k_sem_give(&ble_init_ok);
 
 	if (IS_ENABLED(CONFIG_SETTINGS)) {
 		settings_load();
@@ -992,8 +784,10 @@ void ble_write_thread(void)
 		}
 
 		k_free(buf);
+		LOG_INF("02 k_free uart_data_t");
+
 	}
 }
 
-//K_THREAD_DEFINE(ble_write_thread_id, STACKSIZE, ble_write_thread, NULL, NULL,
-//		NULL, PRIORITY, 0, 0);
+K_THREAD_DEFINE(ble_write_thread_id, STACKSIZE, ble_write_thread, NULL, NULL,
+		NULL, PRIORITY, 0, 0);
